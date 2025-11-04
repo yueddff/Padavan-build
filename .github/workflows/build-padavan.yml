@@ -6,8 +6,6 @@ on:
     tags: [ 'v*' ]
   release:
     types: [published]
-  watch:
-    types: [started]
   workflow_dispatch:
     inputs:
       device_type:
@@ -16,10 +14,11 @@ on:
         default: 'JDC-1'
         type: choice
         options:
-        - JDC-1
-        - K2P
-        - PSG1218
-        - NEWIFI3
+          - JDC-1
+          - K2P
+          - PSG1218
+          - NEWIFI3
+          - RM2100
 
 env:
   KERNEL: 3.4
@@ -27,9 +26,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
 
     - name: Set device type
@@ -38,116 +38,205 @@ jobs:
         if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
           echo "TNAME=${{ github.event.inputs.device_type }}" >> $GITHUB_ENV
         else
-          echo "TNAME=JDC-1" >> $GITHUB_ENV  # 默认设备
+          echo "TNAME=JDC-1" >> $GITHUB_ENV
         fi
         echo "Selected device: $TNAME"
 
-    - name: Initialization environment
+    - name: Install dependencies
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo apt-get update
-        sudo apt-get -y install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd fakeroot \
-        cpio git python3-docutils gettext automake autopoint texinfo build-essential help2man \
-        pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev wget patch
+        sudo apt-get install -y \
+          unzip libtool-bin curl cmake gperf gawk flex bison nano xxd fakeroot \
+          cpio git python3-docutils gettext automake autopoint texinfo \
+          build-essential help2man pkg-config zlib1g-dev libgmp3-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libltdl-dev \
+          wget patch
 
-    - name: Clone source code
+    - name: Clone Padavan source
       run: |
         git clone --depth=1 https://github.com/vb1980/Padavan-KVR /opt/rt-n56u
         cd /opt/rt-n56u/toolchain-mipsel
         sh dl_toolchain.sh
         mkdir -p /opt/images/
 
-    - name: Fix known build issues
+    - name: Fix ncurses patch issue
       run: |
         cd /opt/rt-n56u/trunk
         
-        # 修复 ncurses 补丁问题
+        echo "修复 ncurses 补丁问题..."
+        
+        # 检查并修复 run_tic.in 文件
         if [ -f libs/libncurses/misc/run_tic.in ]; then
           cd libs/libncurses
-          cp misc/run_tic.in misc/run_tic.in.original
+          
+          # 备份原文件
+          cp misc/run_tic.in misc/run_tic.in.backup
+          
+          # 手动修复补丁内容 - 这是解决 run_tic.in 补丁失败的关键
+          # 根据常见的补丁失败情况，手动应用所需的修改
           sed -i 's|@TIC@|tic|g' misc/run_tic.in
           sed -i 's|@DATADIR@|/usr/share|g' misc/run_tic.in
+          sed -i 's|@TERMINFO@|/usr/share/terminfo|g' misc/run_tic.in
+          
+          # 修复可能的权限问题
+          chmod +x misc/run_tic.in
+          
+          # 删除可能存在的补丁拒绝文件
+          find . -name "*.rej" -delete 2>/dev/null || true
+          find . -name "*.orig" -delete 2>/dev/null || true
+          
           cd ../..
         fi
         
-        find . -name "*.rej" -delete
-        find . -name "*.orig" -delete
+        # 清理所有补丁残留
+        find . -name "*.rej" -delete 2>/dev/null || true
+        find . -name "*.orig" -delete 2>/dev/null || true
 
-    - name: Build Firmware
+    - name: Apply additional fixes
+      run: |
+        cd /opt/rt-n56u/trunk
+        
+        # 设置环境变量以避免某些编译问题
+        export CPPFLAGS="-P"
+        export CFLAGS="-O2 -pipe"
+        export CXXFLAGS="-O2 -pipe"
+        
+        # 为工具链设置路径
+        export PATH=/opt/rt-n56u/toolchain-mipsel/toolchain-mipsel/bin:$PATH
+        
+        echo "环境设置完成"
+
+    - name: Build firmware
+      id: build
       run: |
         cd /opt/rt-n56u/trunk
         
         echo "正在为设备 ${{ env.TNAME }} 构建固件..."
         
-        # 检查配置文件是否存在
-        if [ ! -f configs/templates/${{ env.TNAME }}.config ] ; then
-          echo "错误: configs/templates/${{ env.TNAME }}.config 不存在"
+        # 验证配置文件是否存在
+        if [ ! -f "configs/templates/${{ env.TNAME }}.config" ]; then
+          echo "❌ 错误: configs/templates/${{ env.TNAME }}.config 不存在!"
           echo "可用的配置文件:"
-          ls configs/templates/ || echo "configs/templates/ 目录不存在"
+          ls configs/templates/ 2>/dev/null || echo "configs/templates/ 目录不存在"
           exit 1
         fi
         
+        # 复制配置文件
         cp -f configs/templates/${{ env.TNAME }}.config .config
         
-        # 配置修改（保持你之前的配置）
+        echo "应用配置修改..."
+        
+        # 确保 OPENSSL 可执行文件被包含
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=n/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y/g' .config
         
         # 删除原有配置项
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_MENTOHUST/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SSSERVER/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ADBYBY/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPC/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_TUNSAFE/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ALIDDNS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SMARTDNS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SRELAY/d' .config
+        CONFIG_ITEMS=(
+          "MENTOHUST" "SCUTCLIENT" "SHADOWSOCKS" "SSSERVER" "DNSFORWARDER"
+          "ADBYBY" "FRPC" "FRPS" "TUNSAFE" "ALIDDNS" "SMARTDNS" "SRELAY"
+        )
         
-        # 添加新的配置
-        echo "CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SSOBFS=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SSSERVER=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_ADBYBY=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_FRPS=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_CADDY=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_CADDYBIN=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SRELAY=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_WYY=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_WYYBIN=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n" >> .config
+        for item in "${CONFIG_ITEMS[@]}"; do
+          sed -i "/CONFIG_FIRMWARE_INCLUDE_${item}/d" .config
+        done
+        
+        # 添加功能配置
+        cat >> .config << 'EOF'
+# 基础服务
+CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n
+CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n
+CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y
+CONFIG_FIRMWARE_INCLUDE_SSOBFS=n
+CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
+CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n
+
+# 广告过滤和代理
+CONFIG_FIRMWARE_INCLUDE_ADBYBY=y
+CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y
+
+# 内网穿透
+CONFIG_FIRMWARE_INCLUDE_FRPC=n
+CONFIG_FIRMWARE_INCLUDE_FRPS=n
+CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n
+
+# DNS 服务
+CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y
+CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y
+CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=y
+
+# DDNS
+CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y
+
+# 其他服务
+CONFIG_FIRMWARE_INCLUDE_SRELAY=n
+CONFIG_FIRMWARE_INCLUDE_WYY=y
+CONFIG_FIRMWARE_INCLUDE_WYYBIN=n
+CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n
+CONFIG_FIRMWARE_INCLUDE_CADDY=y
+CONFIG_FIRMWARE_INCLUDE_CADDYBIN=n
+
+# 代理工具
+CONFIG_FIRMWARE_INCLUDE_V2RAY=n
+CONFIG_FIRMWARE_INCLUDE_TROJAN=n
+EOF
+        
+        echo "配置完成，开始清理和构建..."
+        
+        # 显示最终配置
+        echo "=== 最终配置摘要 ==="
+        grep "CONFIG_FIRMWARE_INCLUDE" .config | head -20
+        echo "===================="
         
         # 清理并构建
         sudo ./clear_tree
-        echo "开始构建固件..."
-        sudo ./build_firmware_modify ${{ env.TNAME }} 0
         
-        # 检查是否生成固件
-        if ls images/*.trx 1> /dev/null 2>&1; then
-          echo "固件构建成功!"
-          sudo mv -f images/*.trx /opt/images/
+        # 设置编译环境
+        export STAGING_DIR=/opt/rt-n56u/toolchain-mipsel/toolchain-mipsel
+        
+        echo "开始编译固件..."
+        if sudo ./build_firmware_modify ${{ env.TNAME }} 0; then
+          echo "✅ 固件编译成功!"
+          # 移动生成的固件
+          sudo mv -f images/*.trx /opt/images/ 2>/dev/null || true
+          sudo mv -f images/*.bin /opt/images/ 2>/dev/null || true
+          echo "firmware_built=true" >> $GITHUB_OUTPUT
         else
-          echo "错误: 未找到生成的固件文件"
+          echo "❌ 固件编译失败!"
           exit 1
         fi
 
-    - name: Upload packages
+    - name: Check build artifacts
+      run: |
+        echo "检查生成的固件文件..."
+        if ls /opt/images/*.trx /opt/images/*.bin 2>/dev/null; then
+          echo "✅ 找到固件文件:"
+          ls -la /opt/images/
+        else
+          echo "❌ 未找到固件文件"
+          # 检查 images 目录
+          echo "images 目录内容:"
+          ls -la /opt/rt-n56u/trunk/images/ 2>/dev/null || echo "images 目录不存在"
+          exit 1
+        fi
+
+    - name: Upload firmware artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Padavan-${{ env.TNAME }}-firmware
+        name: padavan-${{ env.TNAME }}-firmware
         path: /opt/images/
+        retention-days: 30
+
+    - name: Build success notification
+      if: success()
+      run: |
+        echo "🎉 固件构建成功完成!"
+        echo "设备: ${{ env.TNAME }}"
+        echo "固件文件已上传到 Artifacts"
+
+    - name: Build failure notification
+      if: failure()
+      run: |
+        echo "❌ 固件构建失败"
+        echo "设备: ${{ env.TNAME }}"
+        echo "请检查编译日志获取详细信息"
