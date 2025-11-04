@@ -16,7 +16,7 @@ on:
 
 env:
   TNAME: JDC-1  # 修改为你需要的型号
-  KERNEL: 3.4
+  KERNEL: 4.4
 
 jobs:
   build:
