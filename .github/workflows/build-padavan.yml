@@ -14,23 +14,9 @@ on:
           - PSG1218
           - NEWIFI3
           - RM2100
-          - DIR-882
-          - MI-3
-          - MI-4
-          - MI-R3G
-      include_plugins:
-        description: '包含插件类型'
-        required: true
-        default: 'basic'
-        type: choice
-        options:
-          - basic
-          - full
-          - minimal
 
 env:
-  KERNEL_VERSION: 3.4
-  TOOLCHAIN_DIR: /opt/rt-n56u/toolchain-mipsel
+  KERNEL_VERSION: "3.4"
 
 jobs:
   build:
@@ -42,277 +28,180 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup environment variables
-      id: setup-env
       run: |
-        echo "TNAME=${{ github.event.inputs.device_type }}" >> $GITHUB_ENV
-        echo "PLUGIN_TYPE=${{ github.event.inputs.include_plugins }}" >> $GITHUB_ENV
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "TNAME=${{ github.event.inputs.device_type }}" >> $GITHUB_ENV
+        else
+          echo "TNAME=K2P" >> $GITHUB_ENV
+        fi
         echo "BUILD_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
         echo "Selected device: $TNAME"
-        echo "Plugin type: $PLUGIN_TYPE"
-        echo "Build date: $BUILD_DATE"
 
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          unzip libtool-bin curl cmake gperf gawk flex bison nano xxd \
-          fakeroot cpio git python3 python3-pip python3-docutils \
-          gettext automake autopoint texinfo build-essential help2man \
-          pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev \
-          libncurses5-dev libncursesw5-dev libltdl-dev wget patch \
-          libssl-dev device-tree-compiler acpica-tools
+        sudo apt-get install -y unzip libtool-bin curl cmake gperf gawk flex bison nano xxd
+        sudo apt-get install -y fakeroot cpio git python3 python3-pip python3-docutils
+        sudo apt-get install -y gettext automake autopoint texinfo build-essential help2man
+        sudo apt-get install -y pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev
+        sudo apt-get install -y libncurses5-dev libncursesw5-dev libltdl-dev wget patch
+        sudo apt-get install -y libssl-dev device-tree-compiler
 
     - name: Clone Padavan source code
       run: |
-        echo "正在克隆 Padavan 源码..."
+        echo "Cloning Padavan source code..."
         git clone --depth=1 https://github.com/vb1980/Padavan-KVR /opt/rt-n56u
         ls -la /opt/rt-n56u/
 
     - name: Download and setup toolchain
       run: |
-        echo "设置编译工具链..."
+        echo "Setting up toolchain..."
         cd /opt/rt-n56u/toolchain-mipsel
         bash dl_toolchain.sh
-        echo "工具链版本信息:"
-        /opt/rt-n56u/toolchain-mipsel/toolchain-mipsel/bin/mipsel-linux-uclibc-gcc --version || echo "工具链需要编译"
 
-    - name: Fix known build issues
+    - name: Fix ncurses build issues
       run: |
-        echo "修复已知的编译问题..."
+        echo "Fixing ncurses build issues..."
         cd /opt/rt-n56u/trunk
 
-        # 修复 libncurses 补丁问题
+        # Fix run_tic.in patch failure
         if [ -f libs/libncurses/misc/run_tic.in ]; then
-          echo "修复 run_tic.in 补丁问题..."
           cd libs/libncurses
-          cp misc/run_tic.in misc/run_tic.in.original
-          
-          # 手动应用补丁内容
+          cp misc/run_tic.in misc/run_tic.in.backup
           sed -i 's|@TIC@|tic|g' misc/run_tic.in
           sed -i 's|@DATADIR@|/usr/share|g' misc/run_tic.in
           sed -i 's|@TERMINFO@|/usr/share/terminfo|g' misc/run_tic.in
-          
-          # 确保文件可执行
           chmod +x misc/run_tic.in
           cd ../..
         fi
 
-        # 清理补丁残留文件
+        # Clean patch reject files
         find . -name "*.rej" -delete 2>/dev/null || true
         find . -name "*.orig" -delete 2>/dev/null || true
-        find . -name "*.patch" -exec sh -c 'echo "检查补丁: {}" && patch --dry-run -p1 < {} 2>/dev/null || true' \;
 
-        # 设置环境变量
-        export STAGING_DIR=/opt/rt-n56u/toolchain-mipsel/toolchain-mipsel
-        export PATH=$STAGING_DIR/bin:$PATH
-
-    - name: Configure build parameters
+    - name: Configure build
       run: |
         cd /opt/rt-n56u/trunk
-        echo "配置 $TNAME 的编译参数..."
+        echo "Configuring build for $TNAME"
 
-        # 验证配置文件存在
+        # Check if config exists
         if [ ! -f "configs/templates/$TNAME.config" ]; then
-          echo "❌ 错误: configs/templates/$TNAME.config 不存在!"
-          echo "可用的配置文件:"
-          ls configs/templates/ | head -20
+          echo "Error: config file configs/templates/$TNAME.config not found!"
+          echo "Available configs:"
+          ls configs/templates/ || echo "No configs directory"
           exit 1
         fi
 
-        # 复制基础配置文件
+        # Copy base config
         cp -f configs/templates/$TNAME.config .config
 
-        # 基础配置修改
+        # Enable OpenSSL executable
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=n/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y/g' .config
 
-        # 清理旧配置项
-        CONFIG_ITEMS=(
-          "MENTOHUST" "SCUTCLIENT" "SHADOWSOCKS" "SSSERVER" "DNSFORWARDER"
-          "ADBYBY" "FRPC" "FRPS" "TUNSAFE" "ALIDDNS" "SMARTDNS" "SRELAY"
-          "KOOLPROXY" "CADDY" "ADGUARDHOME" "WYY" "ZEROTIER" "V2RAY" "TROJAN"
-          "SSOBFS" "XRAY" "DDNSTO" "ALDRIVER"
-        )
+        # Remove existing config items
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_MENTOHUST/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SSSERVER/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_ADBYBY/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPC/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TUNSAFE/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_ALIDDNS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SMARTDNS/d' .config
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SRELAY/d' .config
 
-        for item in "${CONFIG_ITEMS[@]}"; do
-          sed -i "/CONFIG_FIRMWARE_INCLUDE_${item}/d" .config
-        done
+        # Add basic configuration
+        echo "CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SSOBFS=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SSSERVER=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ADBYBY=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_FRPC=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_FRPS=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_CADDY=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_CADDYBIN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SRELAY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_WYY=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_WYYBIN=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n" >> .config
 
-    - name: Apply plugin configuration
-      run: |
-        cd /opt/rt-n56u/trunk
-        echo "应用 $PLUGIN_TYPE 插件配置..."
-
-        if [ "$PLUGIN_TYPE" = "minimal" ]; then
-          cat >> .config << 'EOF'
-# 最小化配置 - 只包含基础功能
-CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n
-CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n
-CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n
-CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
-CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n
-CONFIG_FIRMWARE_INCLUDE_ADBYBY=n
-CONFIG_FIRMWARE_INCLUDE_FRPC=n
-CONFIG_FIRMWARE_INCLUDE_FRPS=n
-CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n
-CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNS=n
-CONFIG_FIRMWARE_INCLUDE_SRELAY=n
-EOF
-
-        elif [ "$PLUGIN_TYPE" = "basic" ]; then
-          cat >> .config << 'EOF'
-# 基础配置 - 常用功能
-CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n
-CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n
-CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y
-CONFIG_FIRMWARE_INCLUDE_SSOBFS=n
-CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
-CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n
-CONFIG_FIRMWARE_INCLUDE_ADBYBY=y
-CONFIG_FIRMWARE_INCLUDE_FRPC=n
-CONFIG_FIRMWARE_INCLUDE_FRPS=n
-CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n
-CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y
-CONFIG_FIRMWARE_INCLUDE_V2RAY=n
-CONFIG_FIRMWARE_INCLUDE_TROJAN=n
-CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y
-CONFIG_FIRMWARE_INCLUDE_CADDY=n
-CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=y
-CONFIG_FIRMWARE_INCLUDE_SRELAY=n
-CONFIG_FIRMWARE_INCLUDE_WYY=y
-CONFIG_FIRMWARE_INCLUDE_WYYBIN=n
-CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n
-EOF
-
-        else  # full configuration
-          cat >> .config << 'EOF'
-# 完整配置 - 所有功能
-CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n
-CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n
-CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y
-CONFIG_FIRMWARE_INCLUDE_SSOBFS=y
-CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
-CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n
-CONFIG_FIRMWARE_INCLUDE_ADBYBY=y
-CONFIG_FIRMWARE_INCLUDE_FRPC=y
-CONFIG_FIRMWARE_INCLUDE_FRPS=n
-CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n
-CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y
-CONFIG_FIRMWARE_INCLUDE_V2RAY=n
-CONFIG_FIRMWARE_INCLUDE_TROJAN=n
-CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y
-CONFIG_FIRMWARE_INCLUDE_CADDY=y
-CONFIG_FIRMWARE_INCLUDE_CADDYBIN=n
-CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=y
-CONFIG_FIRMWARE_INCLUDE_SRELAY=n
-CONFIG_FIRMWARE_INCLUDE_WYY=y
-CONFIG_FIRMWARE_INCLUDE_WYYBIN=n
-CONFIG_FIRMWARE_INCLUDE_ZEROTIER=y
-CONFIG_FIRMWARE_INCLUDE_XRAY=n
-CONFIG_FIRMWARE_INCLUDE_DDNSTO=y
-EOF
-        fi
-
-        echo "最终配置摘要:"
-        grep "^CONFIG_FIRMWARE_INCLUDE_" .config | sort
+        echo "Configuration applied successfully"
 
     - name: Build firmware
-      id: build
       run: |
         cd /opt/rt-n56u/trunk
-        echo "开始编译 $TNAME 固件..."
+        echo "Building firmware for $TNAME"
 
-        # 设置编译环境
+        # Set environment
         export STAGING_DIR=/opt/rt-n56u/toolchain-mipsel/toolchain-mipsel
         export PATH=$STAGING_DIR/bin:$PATH
-        
-        # 检查工具链
-        echo "检查编译工具链..."
-        which mipsel-linux-uclibc-gcc || echo "工具链未找到，尝试继续编译"
 
-        # 清理之前的编译结果
+        # Clean previous build
         sudo ./clear_tree
 
-        # 开始编译
-        echo "编译日志开始..."
-        if sudo ./build_firmware_modify $TNAME 0 2>&1 | tee build.log; then
-          echo "✅ 固件编译成功!"
+        # Build firmware
+        echo "Starting build process..."
+        if sudo ./build_firmware_modify $TNAME 0; then
+          echo "Firmware build successful!"
           
-          # 检查生成的固件
-          if ls images/*.trx images/*.bin 2>/dev/null; then
-            mkdir -p /opt/images
-            sudo mv -f images/*.trx images/*.bin /opt/images/ 2>/dev/null || true
-            echo "firmware_built=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ 编译成功但未找到固件文件"
-            exit 1
+          # Create output directory
+          mkdir -p /opt/images
+          
+          # Move firmware files
+          if ls images/*.trx > /dev/null 2>&1; then
+            sudo mv images/*.trx /opt/images/ 2>/dev/null || true
+          fi
+          if ls images/*.bin > /dev/null 2>&1; then
+            sudo mv images/*.bin /opt/images/ 2>/dev/null || true
           fi
         else
-          echo "❌ 固件编译失败!"
-          echo "最后100行编译日志:"
-          tail -100 build.log || true
+          echo "Firmware build failed!"
           exit 1
         fi
 
-    - name: Collect build artifacts
-      if: steps.build.outputs.firmware_built == 'true'
+    - name: Check build results
       run: |
-        echo "收集编译产物..."
-        mkdir -p /tmp/artifacts
-        sudo chmod -R a+rw /opt/images/
-        
-        if ls /opt/images/*.trx /opt/images/*.bin 2>/dev/null; then
-          cp /opt/images/* /tmp/artifacts/ 2>/dev/null || true
-          echo "生成的固件文件:"
-          ls -la /tmp/artifacts/
-          
-          # 计算文件大小
-          for file in /tmp/artifacts/*; do
-            if [ -f "$file" ]; then
-              size=$(du -h "$file" | cut -f1)
-              echo "固件: $(basename "$file") 大小: $size"
-            fi
-          done
+        echo "Checking build results..."
+        if ls /opt/images/*.trx /opt/images/*.bin > /dev/null 2>&1; then
+          echo "Firmware files found:"
+          ls -la /opt/images/
+          echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
         else
-          echo "未找到固件文件"
-          exit 1
+          echo "No firmware files found"
+          echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
         fi
 
     - name: Upload firmware artifacts
+      if: env.BUILD_SUCCESS == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: padavan-${{ env.TNAME }}-${{ env.BUILD_DATE }}
-        path: /tmp/artifacts/*
+        path: /opt/images/
         retention-days: 30
-        if-no-files-found: error
 
-    - name: Upload build log
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log-${{ env.TNAME }}-${{ env.BUILD_DATE }}
-        path: /opt/rt-n56u/trunk/build.log
-        retention-days: 7
-        if-no-files-found: ignore
-
-    - name: Build success notification
+    - name: Build success message
       if: success()
       run: |
-        echo "🎉 Padavan 固件编译成功完成!"
-        echo "📱 设备型号: ${{ env.TNAME }}"
-        echo "🔧 插件类型: ${{ env.PLUGIN_TYPE }}"
-        echo "📅 编译时间: ${{ env.BUILD_DATE }}"
-        echo "📦 固件文件已上传到 Artifacts"
+        echo "✅ Padavan firmware build completed successfully!"
+        echo "Device: ${{ env.TNAME }}"
+        echo "Build date: ${{ env.BUILD_DATE }}"
+        echo "Firmware files are available in the Artifacts section"
 
-    - name: Build failure notification
+    - name: Build failure message
       if: failure()
       run: |
-        echo "❌ Padavan 固件编译失败"
-        echo "📱 设备型号: ${{ env.TNAME }}"
-        echo "🔧 插件类型: ${{ env.PLUGIN_TYPE }}"
-        echo "⚠️ 请检查编译日志获取详细错误信息"
-        echo "💡 建议: 尝试使用 minimal 插件配置重新编译"
+        echo "❌ Padavan firmware build failed"
+        echo "Device: ${{ env.TNAME }}"
+        echo "Please check the build logs for details"
