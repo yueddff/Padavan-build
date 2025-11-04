@@ -1,253 +1,60 @@
-name: Build Padavan Firmware
+name: Build Padavan
 
 on:
   workflow_dispatch:
     inputs:
-      device_type:
-        description: '选择设备型号'
+      device:
+        description: 'Device model'
         required: true
         default: 'JDC-1'
         type: choice
         options:
-          - K2P
-          - JDC-1
-          - PSG1218
-          - NEWIFI3
-          - RM2100
-
-env:
-  KERNEL_VERSION: "3.4"
+        - K2P
+        - JDC-1
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
-
+    
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
-
-    - name: Setup environment variables
+      
+    - name: Set device
       run: |
-        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          echo "TNAME=${{ github.event.inputs.device_type }}" >> $GITHUB_ENV
-        else
-          echo "TNAME=K2P" >> $GITHUB_ENV
-        fi
-        echo "BUILD_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
-        echo "Selected device: $TNAME"
-
-    - name: Install system dependencies
+        echo "TNAME=${{ github.event.inputs.device }}" >> $GITHUB_ENV
+        
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y unzip libtool-bin curl cmake gperf gawk flex bison nano xxd
-        sudo apt-get install -y fakeroot cpio git python3 python3-pip python3-docutils
-        sudo apt-get install -y gettext automake autopoint texinfo build-essential help2man
-        sudo apt-get install -y pkg-config zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev
-        sudo apt-get install -y libncurses5-dev libncursesw5-dev libltdl-dev wget patch
-        sudo apt-get install -y libssl-dev device-tree-compiler
-
-    - name: Clone Padavan source code
+        sudo apt update
+        sudo apt install -y unzip libtool curl cmake gperf gawk flex bison nano xxd
+        sudo apt install -y fakeroot cpio git python3 gettext automake autopoint
+        sudo apt install -y texinfo build-essential pkg-config zlib1g-dev
+        sudo apt install -y libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev
+        sudo apt install -y libncursesw5-dev libltdl-dev wget patch
+        
+    - name: Clone source
       run: |
-        echo "Cloning Padavan source code..."
         git clone --depth=1 https://github.com/vb1980/Padavan-KVR /opt/rt-n56u
-        ls -la /opt/rt-n56u/
-
-    - name: Download and setup toolchain
-      run: |
-        echo "Setting up toolchain..."
         cd /opt/rt-n56u/toolchain-mipsel
-        bash dl_toolchain.sh
-
-    - name: Fix ncurses build issues
+        sh dl_toolchain.sh
+        
+    - name: Fix ncurses
       run: |
-        echo "Fixing ncurses build issues..."
-        cd /opt/rt-n56u/trunk
-
-        # 修复 libncurses 编译问题
-        if [ -f libs/libncurses/Makefile ]; then
-          cd libs/libncurses
-          
-          # 备份原始 Makefile
-          cp Makefile Makefile.backup
-          
-          # 修复 extract_test 目标
-          sed -i 's/^extract_test:.*/extract_test:/' Makefile
-          sed -i '/\t@if test -s \$(srcdir)\/misc\/terminfo.c/d' Makefile
-          sed -i '/\t\@echo "**\*\* \*\*\* \*\*\* \*\*\* \*\*\* \*\*\* \*\*\*"/d' Makefile
-          sed -i '/\t\@echo "**\*\* \*\*\* \*\*\* \*\*\* \*\*\* \*\*\* \*\*\*"/d' Makefile
-          sed -i '/\t\@echo "**\*\* You will see the following message:/d' Makefile
-          sed -i '/\t\@echo "**\*\*   extract_test failed/d' Makefile
-          sed -i '/\t\@echo "**\*\* if the conversion of terminfo/d' Makefile
-          sed -i '/\t\@echo "**\*\* entries fails for any reason."/d' Makefile
-          sed -i '/\t\@echo "**\*\*"/d' Makefile
-          sed -i '/\t\@echo "**\*\* Read the README file in the misc directory,"/d' Makefile
-          sed -i '/\t\@echo "**\*\* and install the terminfo entries manually."/d' Makefile
-          sed -i '/\t\@echo "**\*\*"/d' Makefile
-          sed -i '/\tfalse/d' Makefile
-          
-          # 添加空的 extract_test 目标
-          echo "" >> Makefile
-          echo "extract_test:" >> Makefile
-          echo -e "\t@echo \"Skipping extract_test\"" >> Makefile
-          echo -e "\t@true" >> Makefile
-          
-          cd ../..
-        fi
-
-        # 修复 run_tic.in
-        if [ -f libs/libncurses/misc/run_tic.in ]; then
-          cd libs/libncurses
-          cp misc/run_tic.in misc/run_tic.in.backup
-          sed -i 's|@TIC@|tic|g' misc/run_tic.in
-          sed -i 's|@DATADIR@|/usr/share|g' misc/run_tic.in
-          sed -i 's|@TERMINFO@|/usr/share/terminfo|g' misc/run_tic.in
-          chmod +x misc/run_tic.in
-          cd ../..
-        fi
-
-        # 清理补丁残留文件
-        find . -name "*.rej" -delete 2>/dev/null || true
-        find . -name "*.orig" -delete 2>/dev/null || true
-
-        # 预编译必要的工具
-        cd /opt/rt-n56u/trunk
-        make -C tools/linux
-
-    - name: Configure build
-      run: |
-        cd /opt/rt-n56u/trunk
-        echo "Configuring build for $TNAME"
-
-        # 检查配置文件是否存在
-        if [ ! -f "configs/templates/$TNAME.config" ]; then
-          echo "Error: config file configs/templates/$TNAME.config not found!"
-          echo "Available configs:"
-          ls configs/templates/ || echo "No configs directory"
-          exit 1
-        fi
-
-        # 复制基础配置
-        cp -f configs/templates/$TNAME.config .config
-
-        # 启用 OpenSSL 可执行文件
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=n/CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y/g' .config
-
-        # 移除现有配置项
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_MENTOHUST/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SSSERVER/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ADBYBY/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPC/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_FRPS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_TUNSAFE/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ALIDDNS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SMARTDNS/d' .config
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SRELAY/d' .config
-
-        # 添加基本配置
-        cat >> .config << 'EOF'
-CONFIG_FIRMWARE_INCLUDE_MENTOHUST=n
-CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT=n
-CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y
-CONFIG_FIRMWARE_INCLUDE_SSOBFS=n
-CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
-CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER=n
-CONFIG_FIRMWARE_INCLUDE_ADBYBY=y
-CONFIG_FIRMWARE_INCLUDE_FRPC=n
-CONFIG_FIRMWARE_INCLUDE_FRPS=n
-CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n
-CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y
-CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y
-CONFIG_FIRMWARE_INCLUDE_V2RAY=n
-CONFIG_FIRMWARE_INCLUDE_TROJAN=n
-CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=y
-CONFIG_FIRMWARE_INCLUDE_CADDY=y
-CONFIG_FIRMWARE_INCLUDE_CADDYBIN=n
-CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=y
-CONFIG_FIRMWARE_INCLUDE_SRELAY=n
-CONFIG_FIRMWARE_INCLUDE_WYY=y
-CONFIG_FIRMWARE_INCLUDE_WYYBIN=n
-CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n
-EOF
-
-        echo "Configuration applied successfully"
-
+        cd /opt/rt-n56u/trunk/libs/libncurses
+        [ -f misc/run_tic.in ] && sed -i 's|@TIC@|tic|g; s|@DATADIR@|/usr/share|g' misc/run_tic.in
+        
     - name: Build firmware
       run: |
         cd /opt/rt-n56u/trunk
-        echo "Building firmware for $TNAME"
-
-        # 设置环境变量
-        export STAGING_DIR=/opt/rt-n56u/toolchain-mipsel/toolchain-mipsel
-        export PATH=$STAGING_DIR/bin:$PATH
-
-        # 清理之前的构建
+        cp configs/templates/${{ env.TNAME }}.config .config
         sudo ./clear_tree
-
-        # 先构建工具链和必要的库
-        echo "Building toolchain and libraries..."
-        make tools
-        make toolchain
-        make libs_only
-
-        # 构建固件
-        echo "Starting firmware build process..."
-        if sudo ./build_firmware_modify $TNAME 0; then
-          echo "Firmware build successful!"
-          
-          # 创建输出目录
-          mkdir -p /opt/images
-          
-          # 移动固件文件
-          if ls images/*.trx > /dev/null 2>&1; then
-            sudo mv images/*.trx /opt/images/ 2>/dev/null || true
-          fi
-          if ls images/*.bin > /dev/null 2>&1; then
-            sudo mv images/*.bin /opt/images/ 2>/dev/null || true
-          fi
-        else
-          echo "Firmware build failed!"
-          # 显示详细错误信息
-          echo "Last 50 lines of build log:"
-          tail -50 build.log || echo "No build.log found"
-          exit 1
-        fi
-
-    - name: Check build results
-      run: |
-        echo "Checking build results..."
-        if ls /opt/images/*.trx /opt/images/*.bin > /dev/null 2>&1; then
-          echo "Firmware files found:"
-          ls -la /opt/images/
-          echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
-        else
-          echo "No firmware files found"
-          echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
-        fi
-
-    - name: Upload firmware artifacts
-      if: env.BUILD_SUCCESS == 'true'
+        sudo ./build_firmware_modify ${{ env.TNAME }} 0
+        mkdir -p /tmp/firmware
+        sudo cp images/*.trx /tmp/firmware/ 2>/dev/null || true
+        
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: padavan-${{ env.TNAME }}-${{ env.BUILD_DATE }}
-        path: /opt/images/
-        retention-days: 30
-
-    - name: Build success message
-      if: success()
-      run: |
-        echo "✅ Padavan firmware build completed successfully!"
-        echo "Device: ${{ env.TNAME }}"
-        echo "Build date: ${{ env.BUILD_DATE }}"
-        echo "Firmware files are available in the Artifacts section"
-
-    - name: Build failure message
-      if: failure()
-      run: |
-        echo "❌ Padavan firmware build failed"
-        echo "Device: ${{ env.TNAME }}"
-        echo "Please check the build logs for details"
+        name: firmware
+        path: /tmp/firmware/
