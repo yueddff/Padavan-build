@@ -6,7 +6,7 @@ on:
       device_type:
         description: '选择设备型号'
         required: true
-        default: 'K2P'
+        default: 'JDC-1'
         type: choice
         options:
           - K2P
@@ -51,7 +51,6 @@ jobs:
     - name: Clone Padavan source code
       run: |
         echo "Cloning Padavan source code..."
-        # 尝试使用其他源码库
         git clone --depth=1 https://github.com/hanwckf/rt-n56u /opt/rt-n56u || \
         git clone --depth=1 https://github.com/chongshengB/rt-n56u /opt/rt-n56u || \
         git clone --depth=1 https://github.com/vb1980/Padavan-KVR /opt/rt-n56u
@@ -63,41 +62,22 @@ jobs:
         cd /opt/rt-n56u/toolchain-mipsel
         bash dl_toolchain.sh
 
-    - name: Comprehensive ncurses fix
+    - name: Simple ncurses fix
       run: |
         cd /opt/rt-n56u/trunk
-        echo "Applying comprehensive ncurses fixes..."
+        echo "Applying simple ncurses fixes..."
 
         # 删除所有补丁残留
         find . -name "*.rej" -delete 2>/dev/null || true
         find . -name "*.orig" -delete 2>/dev/null || true
         
-        # 彻底修复 run_tic.in 问题
+        # 直接修复 run_tic.in 文件，避免复杂的 heredoc
         if [ -f libs/libncurses/misc/run_tic.in ]; then
           cd libs/libncurses
-          echo "Applying manual patch to run_tic.in..."
+          echo "Directly fixing run_tic.in..."
           
-          # 创建完整的修复版本
-          cat > run_tic_fix.patch << 'EOF'
---- misc/run_tic.in.orig
-+++ misc/run_tic.in
-@@ -40,7 +40,7 @@
- # These values are replaced by configure.
- prefix=@prefix@
- exec_prefix=@exec_prefix@
--datarootdir=@datarootdir@
-+datarootdir=/usr/share
- datadir=@datadir@
- 
- # If $TIC is not set, use "tic", unless we're building in the source tree.
-EOF
-          
-          # 尝试应用补丁
-          if patch -p1 -N --dry-run < run_tic_fix.patch 2>/dev/null; then
-            patch -p1 -N < run_tic_fix.patch || true
-          fi
-          
-          # 确保文件内容正确
+          # 直接修改文件内容，不使用补丁
+          sed -i 's|datarootdir=@datarootdir@|datarootdir=/usr/share|g' misc/run_tic.in
           sed -i 's|@TIC@|tic|g' misc/run_tic.in
           sed -i 's|@DATADIR@|/usr/share|g' misc/run_tic.in
           sed -i 's|@TERMINFO@|/usr/share/terminfo|g' misc/run_tic.in
@@ -107,9 +87,6 @@ EOF
           # 确保文件可执行
           chmod +x misc/run_tic.in
           
-          # 删除补丁文件
-          rm -f run_tic_fix.patch
-          
           cd ../..
         fi
 
@@ -118,7 +95,7 @@ EOF
           cd libs/libncurses
           # 跳过 extract_test 目标
           sed -i 's/^extract_test:/#extract_test:/' Makefile || true
-          sed -i 's/^\\t.*extract_test/#&/' Makefile || true
+          sed -i 's/^\t.*extract_test/#&/' Makefile || true
           cd ../..
         fi
 
@@ -184,19 +161,19 @@ EOF
         echo "CONFIG_FIRMWARE_INCLUDE_FRPS=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_TUNSAFE=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_ALIDDNS=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=n" >> .config  # 暂时禁用减少复杂度
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=n" >> .config  # 暂时禁用
-        echo "CONFIG_FIRMWARE_INCLUDE_CADDY=n" >> .config  # 暂时禁用
-        echo "CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=n" >> .config  # 暂时禁用
+        echo "CONFIG_FIRMWARE_INCLUDE_KOOLPROXY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_CADDY=n" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_SRELAY=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_WYY=n" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_ZEROTIER=n" >> .config
 
         echo "Minimal configuration applied successfully"
 
-    - name: Build firmware with error handling
+    - name: Build firmware
       run: |
         cd /opt/rt-n56u/trunk
         echo "Building firmware for $TNAME"
@@ -208,49 +185,24 @@ EOF
         # Clean previous build
         sudo ./clear_tree
 
-        # Build with detailed logging
-        echo "Starting build process with detailed logging..."
-        
-        # 尝试构建，如果失败则尝试跳过某些步骤
-        if ! sudo ./build_firmware_modify $TNAME 0 2>&1 | tee build.log; then
-          echo "First build attempt failed, checking logs..."
+        # Build firmware
+        echo "Starting build process..."
+        if sudo ./build_firmware_modify $TNAME 0; then
+          echo "Firmware build successful!"
           
-          # 检查是否是 ncurses 问题
-          if grep -q "run_tic.in" build.log || grep -q "extract_test" build.log; then
-            echo "Ncurses issue detected, applying emergency fix..."
-            
-            # 跳过有问题的测试
-            cd libs/libncurses
-            if [ -f Makefile ]; then
-              # 注释掉有问题的目标
-              sed -i 's/^extract_test:/#extract_test:/' Makefile
-              sed -i 's/^\\t.*extract_test/#&/' Makefile
-            fi
-            cd ../..
-            
-            # 重新尝试构建
-            echo "Retrying build after emergency fix..."
-            if sudo ./build_firmware_modify $TNAME 0; then
-              echo "Build successful after emergency fix!"
-            else
-              echo "Build failed even after emergency fix"
-              exit 1
-            fi
-          else
-            echo "Build failed for other reasons"
-            exit 1
+          # Create output directory
+          mkdir -p /opt/images
+          
+          # Move firmware files
+          if ls images/*.trx > /dev/null 2>&1; then
+            sudo mv images/*.trx /opt/images/ 2>/dev/null || true
+          fi
+          if ls images/*.bin > /dev/null 2>&1; then
+            sudo mv images/*.bin /opt/images/ 2>/dev/null || true
           fi
         else
-          echo "Build successful on first attempt!"
-        fi
-        
-        # Move firmware files
-        mkdir -p /opt/images
-        if ls images/*.trx > /dev/null 2>&1; then
-          sudo mv images/*.trx /opt/images/ 2>/dev/null || true
-        fi
-        if ls images/*.bin > /dev/null 2>&1; then
-          sudo mv images/*.bin /opt/images/ 2>/dev/null || true
+          echo "Firmware build failed!"
+          exit 1
         fi
 
     - name: Check build results
@@ -275,14 +227,6 @@ EOF
         path: /opt/images/
         retention-days: 30
 
-    - name: Upload build log
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log-${{ env.TNAME }}
-        path: /opt/rt-n56u/trunk/build.log
-        retention-days: 7
-
     - name: Build success message
       if: success() && env.BUILD_SUCCESS == 'true'
       run: |
@@ -297,4 +241,3 @@ EOF
         echo "❌ Padavan firmware build failed"
         echo "Device: ${{ env.TNAME }}"
         echo "Please check the build logs for details"
-        echo "Build log has been uploaded as an artifact"
