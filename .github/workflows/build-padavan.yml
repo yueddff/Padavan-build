@@ -50,7 +50,7 @@ jobs:
     - name: Clone Padavan source code
       run: |
         echo "Cloning Padavan source code..."
-        git clone --depth=1 https://github.com/hiboyhiboy/rt-n56u /opt/rt-n56u
+        git clone --depth=1 https://github.com/immortalwrt/padavan /opt/rt-n56u
         ls -la /opt/rt-n56u/
 
     - name: Download and setup toolchain
