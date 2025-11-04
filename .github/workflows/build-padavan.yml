@@ -75,7 +75,6 @@ jobs:
           cp misc/run_tic.in misc/run_tic.in.backup
           
           # 手动修复补丁内容 - 这是解决 run_tic.in 补丁失败的关键
-          # 根据常见的补丁失败情况，手动应用所需的修改
           sed -i 's|@TIC@|tic|g' misc/run_tic.in
           sed -i 's|@DATADIR@|/usr/share|g' misc/run_tic.in
           sed -i 's|@TERMINFO@|/usr/share/terminfo|g' misc/run_tic.in
